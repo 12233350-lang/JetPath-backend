@@ -15,17 +15,85 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+// Initialize OpenAI (only if API key is provided)
+let openai = null;
+if (process.env.OPENAI_API_KEY) {
+  try {
+    openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY
+    });
+    console.log('✅ OpenAI initialized');
+  } catch (error) {
+    console.warn('⚠️  OpenAI initialization failed:', error.message);
+  }
+} else {
+  console.warn('⚠️  OPENAI_API_KEY not set - chatbot feature will be disabled');
+}
 
 const app = express();
 const port = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
+// ==================== MIDDLEWARE (MUST BE FIRST) ====================
+// Middleware must come first to handle all requests properly
 app.use(cors());
 app.use(express.json());
+
+// Request logging middleware (for debugging)
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
+// ==================== CRITICAL ROUTES ====================
+// These routes are defined after middleware to ensure proper request handling
+
+// Health check endpoint for Railway
+app.get('/health', (req, res) => {
+  console.log('✅ Health check endpoint called');
+  res.status(200).json({ 
+    status: 'ok', 
+    message: 'Server is running',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Root endpoint - handle all HTTP methods
+app.get('/', (req, res) => {
+  console.log('✅ Root endpoint (GET) called');
+  res.status(200).json({ 
+    status: 'ok', 
+    message: 'JetPath Airlines API is running',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      auth: '/api/Login/*',
+      flights: '/api/Flight/*',
+      userFlights: '/api/UserFlights/*',
+      reviews: '/api/Review/*',
+      support: '/api/Support/*',
+      admin: '/api/Admin/*',
+      chatbot: '/api/chatbot/*',
+      health: '/health'
+    }
+  });
+});
+
+// Also handle root with other methods
+app.all('/', (req, res) => {
+  if (req.method !== 'GET') {
+    console.log(`✅ Root endpoint (${req.method}) called`);
+  }
+  res.status(200).json({ 
+    status: 'ok', 
+    message: 'JetPath Airlines API is running',
+    version: '1.0.0',
+    method: req.method,
+    timestamp: new Date().toISOString()
+  });
+});
+
+console.log('✅ Root and health routes registered');
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -73,6 +141,22 @@ const upload = multer({
 });
 
 // MySQL Connection Pool
+const dbConfig = {
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD ? '***' : '',
+  database: process.env.DB_NAME || 'JetPathAirline',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+};
+
+console.log('🔌 Database Configuration:');
+console.log(`   Host: ${dbConfig.host}`);
+console.log(`   User: ${dbConfig.user}`);
+console.log(`   Database: ${dbConfig.database}`);
+console.log(`   Password: ${process.env.DB_PASSWORD ? '✅ Set' : '⚠️  Not set'}`);
+
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
@@ -83,14 +167,19 @@ const pool = mysql.createPool({
   queueLimit: 0
 });
 
-// Test database connection
+// Test database connection (non-blocking)
 pool.getConnection()
   .then(connection => {
-    console.log('Connected to MySQL database');
+    console.log('✅ Connected to MySQL database successfully');
+    console.log(`   Database: ${process.env.DB_NAME || 'JetPathAirline'}`);
     connection.release();
   })
   .catch(err => {
-    console.error('Database connection error:', err);
+    console.error('⚠️  Database connection error (server will still start):');
+    console.error(`   Error: ${err.message}`);
+    console.error(`   Code: ${err.code || 'N/A'}`);
+    console.log('⚠️  Server will continue to run. Database connection will be retried on first request.');
+    console.log('⚠️  Make sure the database and tables exist. Check Railway logs for more details.');
   });
 
 // ==================== HELPER FUNCTIONS ====================
@@ -1493,6 +1582,13 @@ app.post('/api/chatbot/query', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Message is required' });
     }
 
+    if (!openai) {
+      return res.status(503).json({
+        success: false,
+        message: 'Chatbot service is currently unavailable. Please contact support if this issue persists.',
+      });
+    }
+
     // Extract unique locations from flights for context
     const uniqueLocations = flights ? [...new Set(flights.map(f => f.arrivalLocation).filter(Boolean))] : [];
     const locationNames = uniqueLocations.length > 0 
@@ -1618,12 +1714,90 @@ Extract the flight search parameters and provide a helpful response. If the user
   }
 });
 
+// ==================== CATCH-ALL ROUTE ====================
+
+// Catch-all route for undefined endpoints (must be last)
+app.all('*', (req, res) => {
+  console.log(`⚠️  Unmatched route: ${req.method} ${req.path}`);
+  res.status(404).json({ 
+    status: 'error', 
+    message: 'Route not found',
+    path: req.path,
+    method: req.method,
+    availableEndpoints: {
+      root: '/',
+      health: '/health',
+      auth: '/api/Login/*',
+      flights: '/api/Flight/*',
+      userFlights: '/api/UserFlights/*',
+      reviews: '/api/Review/*',
+      support: '/api/Support/*',
+      admin: '/api/Admin/*',
+      chatbot: '/api/chatbot/*'
+    }
+  });
+});
+
 // ==================== START SERVER ====================
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-  console.log(`API endpoints available at http://localhost:${port}/api`);
+const HOST = process.env.HOST || '0.0.0.0';
+
+// Ensure server starts even if there are errors
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled Promise Rejection:', err);
 });
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  // Don't exit - let Railway handle restart
+});
+
+// Start server
+console.log('📝 Starting server...');
+console.log('═══════════════════════════════════════════════════════');
+console.log('🔧 Environment Configuration:');
+console.log(`   NODE_ENV: ${process.env.NODE_ENV || 'development'}`);
+console.log(`   PORT: ${process.env.PORT || 'not set (using default 3001)'}`);
+console.log(`   HOST: ${HOST}`);
+console.log(`   Final port: ${port}`);
+console.log('═══════════════════════════════════════════════════════');
+
+try {
+  const server = app.listen(port, HOST, () => {
+    console.log('🚀 Server started successfully!');
+    console.log(`📍 Server running on ${HOST}:${port}`);
+    console.log(`🌐 Root endpoint: http://${HOST}:${port}/`);
+    console.log(`💚 Health check: http://${HOST}:${port}/health`);
+    console.log(`🌐 API endpoints available at http://${HOST}:${port}/api`);
+    console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🔌 Database: ${process.env.DB_HOST || 'localhost'}:${process.env.DB_NAME || 'JetPathAirline'}`);
+    console.log(`🔑 JWT Secret: ${process.env.JWT_SECRET ? '✅ Set' : '⚠️  Not set (using default)'}`);
+    console.log(`🤖 OpenAI: ${openai ? '✅ Initialized' : '⚠️  Not available'}`);
+    console.log('✅ All routes initialized and ready to accept requests');
+    console.log('✅ Server is ready to handle requests');
+  });
+
+  // Handle server errors
+  server.on('error', (err) => {
+    console.error('❌ Server error event:', err);
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${port} is already in use`);
+    } else {
+      console.error('❌ Server error:', err);
+    }
+    process.exit(1);
+  });
+
+  // Log when server is listening
+  server.on('listening', () => {
+    const addr = server.address();
+    console.log(`✅ Server is listening on ${addr.address}:${addr.port}`);
+  });
+} catch (error) {
+  console.error('❌ Failed to start server:', error);
+  console.error('❌ Error stack:', error.stack);
+  process.exit(1);
+}
 
 
 
